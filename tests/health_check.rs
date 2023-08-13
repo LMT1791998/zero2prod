@@ -1,5 +1,6 @@
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::TcpListener;
+use std::vec;
 use uuid::Uuid;
 use zero2prod::configuration::{get_configuration, DatabaseSettings};
 use zero2prod::startup::run;
@@ -7,6 +8,30 @@ use zero2prod::startup::run;
 pub struct TestApp {
     pub address: String,
     pub db_pool: PgPool,
+}
+
+async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    // Create database
+    let mut connection = PgConnection::connect(&config.connection_string_without_db())
+        .await
+        .expect("Failed to connect to Postgres");
+
+    connection
+        .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str())
+        .await
+        .expect("Failed to create database.");
+
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("Failed to connect to Postgres.");
+
+    // Migrate database
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate the database");
+
+    connection_pool
 }
 
 async fn spawn_app() -> TestApp {
@@ -30,30 +55,6 @@ async fn spawn_app() -> TestApp {
         address,
         db_pool: connection_pool,
     }
-}
-
-async fn configure_database(config: &DatabaseSettings) -> PgPool {
-    // Create database
-    let mut connection = PgConnection::connect(&config.connection_string_without_db())
-        .await
-        .expect("Failed to connect to Postgres");
-
-    connection
-        .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str())
-        .await
-        .expect("Failed to create database.");
-
-    // Migrate database
-    let connection_pool = PgPool::connect(&config.connection_string())
-        .await
-        .expect("Failed to connect to Postgres.");
-
-    sqlx::migrate!("./migrations")
-        .run(&connection_pool)
-        .await
-        .expect("Failed to migrate the database");
-
-    connection_pool
 }
 
 // `tokio::test` is the testing equivalent of `tokio::main`.
@@ -87,15 +88,11 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
     let client = reqwest::Client::new();
 
     // Act
-    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+    let params = [("name", "le guin"), ("email", "ursula_le_guin@gmail.com")];
 
-    /*
-    TODO: Reformat later for responese
-    */
     let response = client
         .post(&format!("{}/subscriptions", &app.address))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
+        .form(&params)
         .send()
         .await
         .expect("Failed to execute request.");
@@ -120,18 +117,18 @@ async fn subscribe_returns_a_400_when_data_is_missing() {
     // Arrange
     let app = spawn_app().await;
     let client = reqwest::Client::new();
+
     let test_cases = vec![
-        ("name=le%20guin", "missing the email"),
-        ("email=ursula_le_guin%40gmail.com", "missing the name"),
-        ("", "missing both name and email"),
+        ([("name", "le guin")], "missing the email"),
+        ([("email", "ursula_le_guin@gmail.com")], "missing the name"),
+        ([("", "")], "missing bot name and email"),
     ];
 
-    for (invalid_body, error_message) in test_cases {
+    for (invalid_params, error_message) in test_cases {
         // Act
         let response = client
             .post(&format!("{}/subscriptions", &app.address))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(invalid_body)
+            .form(&invalid_params)
             .send()
             .await
             .expect("Failed to execute request.");
